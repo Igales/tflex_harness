@@ -52,6 +52,18 @@ def worker():
     from tflex_harness.config import load_config
     from tflex_harness.runner import run_csharp_snippet
     cfg = load_config(ROOT)
+    if request["mode"] == "model_recipe":
+        from tflex_harness.recipes import run_recipe
+        from tflex_model_operations import checked_model_path
+        workspace = cfg.artifacts_dir / "tflex_docs" / "mcp_models"
+        output = Path(checked_model_path(workspace, request["file_name"], ".grb", False))
+        result = run_recipe("create_simple_3d_extrusion", args={"output_file": str(output)},
+                            timeout_sec=request["timeout_sec"], config=cfg)
+        valid = result.get("ok") is True and output.is_file() and output.stat().st_size > 0
+        json.dump({"ok": valid, "stage": result.get("stage"), "saved": valid,
+                   "file_name": output.name if valid else None,
+                   "geometry_verified": False, "reopened": False}, sys.stdout)
+        return
     missing = [name + ".dll" for name in REFERENCES
                if not (cfg.tflex_program_dir / (name + ".dll")).is_file()]
     if missing:
@@ -80,6 +92,11 @@ def execute(code, mode, timeout_sec):
         return {"ok": False, "stage": "input", "error": "Invalid mode"}
     if mode == "run" and os.environ.get("TFLEX_MCP_ALLOW_RUN") != "1":
         return {"ok": False, "stage": "permission", "error": "Run disabled locally"}
+    return execute_worker({"code": code, "mode": mode, "timeout_sec": timeout_sec})
+
+
+def execute_worker(request):
+    timeout_sec = request["timeout_sec"]
     if not LOCK.acquire(blocking=False):
         return {"ok": False, "stage": "busy", "error": "Another request is active"}
     proc = None
@@ -90,7 +107,7 @@ def execute(code, mode, timeout_sec):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
         )
-        payload = json.dumps({"code": code, "mode": mode, "timeout_sec": timeout_sec})
+        payload = json.dumps(request)
         try:
             stdout, stderr = proc.communicate(payload, timeout=2 * timeout_sec + 20)
         except subprocess.TimeoutExpired:
@@ -129,7 +146,8 @@ def main():
     from tflex_harness.config import load_config
     from tflex_harness.docs_search import DocsSearch
     import serve_mcp_readonly as legacy
-    from tflex_bridge_read import BridgeReader
+    from tflex_bridge_read import BridgeReader, canonical_id
+    from tflex_model_operations import GUI_ACTIONS, ModelOperations
 
     key = os.environ.get("TFLEX_MCP_API_KEY", "")
     if len(key) < 32 or not key.isascii() or any(c.isspace() for c in key):
@@ -142,6 +160,11 @@ def main():
     cfg = load_config(ROOT)
     bridge = BridgeReader()
     bridge_reads_enabled = os.environ.get("TFLEX_MCP_ALLOW_BRIDGE_READ") == "1"
+    bridge_edit_enabled = os.environ.get("TFLEX_MCP_ALLOW_BRIDGE_EDIT") == "1"
+    model_workspace = cfg.artifacts_dir / "tflex_docs" / "mcp_models"
+    model_ops = ModelOperations(bridge, model_workspace)
+    if bridge_edit_enabled:
+        model_workspace.mkdir(parents=True, exist_ok=True)
 
     @server.tool()
     def get_bridge_status() -> dict:
@@ -153,7 +176,7 @@ def main():
     @server.tool()
     def get_document_snapshot(session_id: str = "", doc_id: str = "", include: str = "summary",
                               offset: int = 0, limit: int = 40) -> dict:
-        """Inspect T-FLEX GUI documents. Summary lists documents; variables and operations require
+        """Inspect T-FLEX GUI. summary lists documents; variables, operations, selection and inspect require
         session_id and doc_id from summary. Writes bridge request/audit files; never edits the
         CAD document, saves GRB, compiles C#, or starts an external CAD process.
         Pages are independent, not a single atomic geometry snapshot.
@@ -161,7 +184,83 @@ def main():
         if not bridge_reads_enabled:
             return {"ok": False, "status": "bridge_reads_disabled"}
         return bridge.snapshot(session_id, doc_id, include, offset, limit)
-        
+
+    @server.tool()
+    def get_model_capabilities() -> dict:
+        """Read enabled tools and model workspace location. Does not write or send CAD requests."""
+        return {"gui_read_enabled": bridge_reads_enabled, "gui_write_enabled": bridge_edit_enabled,
+                "gui_actions": GUI_ACTIONS, "gui_review": True, "batch_edits": False,
+                "new_model_recipes": ["simple_3d_extrusion"] if bridge_edit_enabled else [],
+                "workspace": str(model_workspace) if bridge_edit_enabled else None}
+
+    @server.tool()
+    def get_model_object(session_id: str, doc_id: str, object_id: str, property_name: str = "") -> dict:
+        """Read an object's schema, or one real API property with units. Not independent metrology."""
+        if not bridge_reads_enabled:
+            return {"ok": False, "status": "bridge_reads_disabled"}
+        return bridge.object_details(session_id, doc_id, object_id, property_name)
+
+    @server.tool()
+    def submit_model_operation(session_id: str, job_id: str, action: str,
+                               arguments: dict[str, str], doc_id: str = "") -> dict:
+        """Send one GUI operation for CAD Review. Use a stable UUID job_id and read its result.
+        open_grb (no doc_id), save_copy, export_step take file_name in the model workspace.
+        set_variable takes name and numeric_literal in native units; bind_parameter takes
+        object_id, property and variable. regenerate, activate, show_3d, close take {}.
+        All except open_grb require the document ID. No original overwrite or arbitrary C#.
+        """
+        if not bridge_edit_enabled:
+            return {"ok": False, "status": "bridge_edits_disabled"}
+        return model_ops.submit(session_id, doc_id, job_id, action, arguments)
+
+    @server.tool()
+    def get_model_operation_result(session_id: str, job_id: str) -> dict:
+        """Read an existing GUI job's status without resubmission."""
+        if not bridge_edit_enabled:
+            return {"ok": False, "status": "bridge_edits_disabled"}
+        return model_ops.status(session_id, job_id)
+
+    @server.tool()
+    def create_model_from_recipe(recipe: str, job_id: str) -> dict:
+        """Create a new GRB in the model workspace via an installed, fixed C# recipe.
+        Only simple_3d_extrusion (fixed sample dimensions) is supported. No caller source code
+        or path accepted. This runs a separate CAD session, not the GUI document or a sandbox.
+        """
+        if not bridge_edit_enabled:
+            return {"ok": False, "status": "bridge_edits_disabled"}
+        try:
+            if recipe != "simple_3d_extrusion" or not canonical_id(job_id):
+                return {"ok": False, "status": "invalid_recipe_or_job"}
+            with (model_workspace / (".create-" + job_id)).open("x"):
+                pass
+            outcome = {"job_id": job_id, **execute_worker({"mode": "model_recipe",
+                       "timeout_sec": 45, "file_name": "sample-" + job_id + ".grb"})}
+            pending = model_workspace / (".result-" + job_id + ".tmp")
+            pending.write_text(json.dumps(outcome, ensure_ascii=True), encoding="utf-8")
+            pending.replace(pending.with_suffix(".json"))
+            return outcome
+        except FileExistsError:
+            return {"ok": False, "status": "job_already_reserved_do_not_repeat", "job_id": job_id}
+        except (OSError, ValueError):
+            return {"ok": False, "status": "creation_not_confirmed_check_workspace", "job_id": job_id}
+
+    @server.tool()
+    def get_model_creation_result(job_id: str) -> dict:
+        """Read an existing create job's result; it never launches another recipe."""
+        if not bridge_edit_enabled:
+            return {"ok": False, "status": "bridge_edits_disabled"}
+        try:
+            if not canonical_id(job_id):
+                return {"ok": False, "status": "invalid_job_id"}
+            if not (model_workspace / (".create-" + job_id)).is_file():
+                return {"ok": False, "status": "unknown_job", "job_id": job_id}
+            result = model_workspace / (".result-" + job_id + ".json")
+            if not result.is_file():
+                return {"ok": True, "status": "no_final_result_do_not_repeat", "job_id": job_id}
+            return json.loads(result.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"ok": False, "status": "creation_result_unavailable", "job_id": job_id}
+
     @server.tool()
     def search_tflex_docs(query: str, scope: str = "all", limit: int = 5) -> dict:
         """Search API reference (includes 17.1.30.0). User installed CAD 17.1.50.0;

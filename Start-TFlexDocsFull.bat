@@ -38,8 +38,8 @@ try {
     Remove-Item Env:\TFLEX_MCP_ALLOW_RUN -ErrorAction SilentlyContinue
 
     $PowerShellExe = Join-Path $PSHOME 'powershell.exe'
-    $ServerArgs = '-NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "{0}" -EnableRun -EnableBridgeRead' -f $Script
-    Write-Host 'Starting full MCP server with C# execution and direct bridge reads enabled.'
+    $ServerArgs = '-NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "{0}" -EnableBridgeRead -EnableBridgeEdit' -f $Script
+    Write-Host 'Starting MCP server with direct bridge reads and model operations enabled. Arbitrary C# execution is disabled.'
     $ServerProcess = Start-Process -FilePath $PowerShellExe -ArgumentList $ServerArgs -WorkingDirectory $LauncherDir -PassThru
 
     Write-Host 'Waiting up to 120 seconds for local port 8000...'
@@ -60,7 +60,7 @@ try {
 
     Write-Host ''
     Write-Host 'Startup commands completed. Check BOTH new windows for errors.'
-    Write-Host 'MCP: confirm Run enabled: True and Bridge reads enabled: True.'
+    Write-Host 'MCP: confirm Run enabled: False, Bridge reads enabled: True, and Bridge model operations enabled: True.'
     Write-Host 'ngrok: confirm Session Status = online.'
     Write-Host 'Connector URL: HTTPS forwarding address + /mcp.'
     Write-Host 'The existing MCP API key and local ngrok configuration are reused.'
