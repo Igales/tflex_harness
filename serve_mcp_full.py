@@ -163,6 +163,8 @@ def main():
     bridge_edit_enabled = os.environ.get("TFLEX_MCP_ALLOW_BRIDGE_EDIT") == "1"
     model_workspace = cfg.artifacts_dir / "tflex_docs" / "mcp_models"
     model_ops = ModelOperations(bridge, model_workspace)
+    from tflex_geometry_stage1 import register_geometry_tools
+    register_geometry_tools(server, bridge, model_workspace, bridge_edit_enabled)
     if bridge_edit_enabled:
         model_workspace.mkdir(parents=True, exist_ok=True)
 
@@ -189,7 +191,7 @@ def main():
     def get_model_capabilities() -> dict:
         """Read enabled tools and model workspace location. Does not write or send CAD requests."""
         return {"gui_read_enabled": bridge_reads_enabled, "gui_write_enabled": bridge_edit_enabled,
-                "gui_actions": GUI_ACTIONS, "gui_review": True, "batch_edits": False,
+                "geometry_api": "geometry-stage1-2", "geometry_tools": ["create_block", "create_cylinder", "boolean_unite", "boolean_subtract", "boolean_intersect", "get_geometry_operation_result"], "gui_actions": GUI_ACTIONS, "gui_review": True, "batch_edits": False,
                 "new_model_recipes": ["simple_3d_extrusion"] if bridge_edit_enabled else [],
                 "workspace": str(model_workspace) if bridge_edit_enabled else None}
 
