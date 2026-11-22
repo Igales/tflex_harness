@@ -161,7 +161,6 @@ def main():
         if not bridge_reads_enabled:
             return {"ok": False, "status": "bridge_reads_disabled"}
         return bridge.snapshot(session_id, doc_id, include, offset, limit)
-
     @server.tool()
     def search_tflex_docs(query: str, scope: str = "all", limit: int = 5) -> dict:
         """Search API reference (includes 17.1.30.0). User installed CAD 17.1.50.0;
