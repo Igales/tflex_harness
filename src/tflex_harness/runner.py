@@ -362,9 +362,9 @@ def resolve_csharp_helpers(cfg: HarnessConfig, helpers: list[str] | None) -> tup
 
 def _compile_cache_key(code: str, refs: list[Path], csc: Path, helper_sources: list[Path] | None = None) -> str:
     digest = hashlib.sha256()
-    digest.update(b"tflex_harness.csc.v2\0")
+    digest.update(b"tflex_harness.csc.v3.utf8\0")
     digest.update(str(csc).encode("utf-8", errors="replace"))
-    digest.update(b"\0/platform:x64\0/target:exe\0")
+    digest.update(b"\0/utf8output\0/platform:x64\0/target:exe\0")
     digest.update(code.encode("utf-8"))
     for helper in helper_sources or []:
         digest.update(b"\0helper\0")
@@ -716,6 +716,7 @@ def _run_csharp_snippet_impl(
         cmd = [
             str(csc),
             "/nologo",
+            "/utf8output",
             "/platform:x64",
             "/target:exe",
             f"/out:{exe}",

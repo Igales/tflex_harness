@@ -1,4 +1,4 @@
-using TFlex;
+﻿using TFlex;
 
 namespace TFlexRunner
 {
@@ -14,11 +14,6 @@ namespace TFlexRunner
             setup.PromptToSaveModifiedDocuments = false;
             setup.ProtectionLicense = ApplicationSessionSetup.License.TFlexAPI;
             return setup;
-        }
-
-        public static bool IsInitialized
-        {
-            get { return Application.IsSessionInitialized; }
         }
     }
 }
