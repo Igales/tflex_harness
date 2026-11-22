@@ -14,6 +14,7 @@ try {
     $LauncherDir = Split-Path -LiteralPath $env:TFLEX_FULL_LAUNCHER
     $Script = Join-Path $LauncherDir 'Start-TFlexFull.ps1'
     $KeyFile = Join-Path $env:APPDATA 'TFlexDocs\mcp-api-key.dpapi'
+
     foreach ($File in @($Script, $KeyFile)) {
         if (-not (Test-Path -LiteralPath $File -PathType Leaf)) {
             throw ('Required file missing: ' + $File)
@@ -30,14 +31,17 @@ try {
     if (Get-Process -Name ngrok -ErrorAction SilentlyContinue) {
         throw 'ngrok is already running. No new processes started.'
     }
+
     # The server script reads the existing DPAPI key itself.
     # Do not pass an inherited plaintext MCP key to either new window.
     Remove-Item Env:\TFLEX_MCP_API_KEY -ErrorAction SilentlyContinue
     Remove-Item Env:\TFLEX_MCP_ALLOW_RUN -ErrorAction SilentlyContinue
+
     $PowerShellExe = Join-Path $PSHOME 'powershell.exe'
-    $ServerArgs = '-NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "{0}" -EnableRun' -f $Script
-    Write-Host 'Starting full MCP server with execution enabled (-EnableRun).'
+    $ServerArgs = '-NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "{0}" -EnableRun -EnableBridgeRead' -f $Script
+    Write-Host 'Starting full MCP server with C# execution and direct bridge reads enabled.'
     $ServerProcess = Start-Process -FilePath $PowerShellExe -ArgumentList $ServerArgs -WorkingDirectory $LauncherDir -PassThru
+
     Write-Host 'Waiting up to 120 seconds for local port 8000...'
     $Deadline = (Get-Date).AddSeconds(120)
     while (-not (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue)) {
@@ -49,12 +53,14 @@ try {
         }
         Start-Sleep -Milliseconds 500
     }
+
     # A listening port is a readiness signal, not an authenticated MCP health check.
     $TunnelArgs = '-NoLogo -NoProfile -NoExit -Command "& ngrok http http://127.0.0.1:8000 --host-header=127.0.0.1:8000 --inspect=false; if ($LASTEXITCODE -ne 0) { Write-Host (''ngrok exited with code '' + $LASTEXITCODE) -ForegroundColor Red }"'
     Start-Process -FilePath $PowerShellExe -ArgumentList $TunnelArgs -WorkingDirectory $LauncherDir | Out-Null
+
     Write-Host ''
     Write-Host 'Startup commands completed. Check BOTH new windows for errors.'
-    Write-Host 'MCP: confirm Run enabled: True and successful server startup.'
+    Write-Host 'MCP: confirm Run enabled: True and Bridge reads enabled: True.'
     Write-Host 'ngrok: confirm Session Status = online.'
     Write-Host 'Connector URL: HTTPS forwarding address + /mcp.'
     Write-Host 'The existing MCP API key and local ngrok configuration are reused.'
