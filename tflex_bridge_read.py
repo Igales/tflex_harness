@@ -129,11 +129,19 @@ class BridgeReader:
             "list_documents": set(),
             "variables": {"doc_id", "offset", "limit"},
             "operations": {"doc_id", "offset", "limit"},
+            "selection": {"doc_id", "offset", "limit"},
+            "inspect": {"doc_id"},
+            "object_info": {"doc_id", "object_id"},
+            "measure_property": {"doc_id", "object_id", "property"},
         }
         if command not in argument_sets or set(arguments) != argument_sets[command]:
             raise ValueError("Unsupported bridge read")
-        fields = {k: str(v) for k, v in arguments.items()}
         rid = str(uuid4())
+        self._submit(directory, session, rid, command, arguments)
+        return self._await_result(directory, session, rid, deadline, "ok")
+
+    def _submit(self, directory, session, rid, command, arguments):
+        fields = {k: str(v) for k, v in arguments.items()}
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "0+00:00"
         fields.update(protocol=PROTOCOL, pid=session["pid"], session_id=session["session_id"],
                       request_id=rid, created_utc=now, command=command)
@@ -145,13 +153,22 @@ class BridgeReader:
             temporary.rename(temporary.with_suffix(".req"))
         finally:
             temporary.unlink(missing_ok=True)
-        result_path = directory / "results" / (rid + ".txt")
+
+    def _result(self, directory, session, rid):
+        result = decode(directory / "results" / (rid + ".txt"))
+        target = {"protocol": PROTOCOL, "pid": session["pid"],
+                  "session_id": session["session_id"], "request_id": rid}
+        if any(result.get(k) != v for k, v in target.items()):
+            return _error("response_target_mismatch", request_id=rid)
+        return result
+
+    def _await_result(self, directory, session, rid, deadline, expected):
         while True:
             try:
-                result = decode(result_path)
-                if any(result.get(k) != fields[k] for k in ("protocol", "pid", "session_id", "request_id")):
-                    return _error("response_target_mismatch", request_id=rid)
-                if result.get("status") != "ok":
+                result = self._result(directory, session, rid)
+                if result.get("ok") is False:
+                    return result
+                if result.get("status") != expected:
                     return _error("cad_read_failed", request_id=rid, error_type=result.get("error_type"))
                 return result
             except FileNotFoundError:
@@ -166,7 +183,7 @@ class BridgeReader:
         try:
             if ((session_id and not canonical_id(session_id)) or
                     (doc_id and not canonical_id(doc_id)) or
-                    include not in ("summary", "variables", "operations") or
+                    include not in ("summary", "variables", "operations", "selection", "inspect") or
                     type(offset) is not int or not 0 <= offset <= 1_000_000 or
                     type(limit) is not int or not 1 <= limit <= 100 or
                     (include != "summary" and not (session_id and doc_id))):
@@ -179,6 +196,8 @@ class BridgeReader:
             directory, session = found[0]
             if include == "summary":
                 result = self._query(directory, session, "list_documents", time.monotonic() + 4)
+            elif include == "inspect":
+                result = self._query(directory, session, include, time.monotonic() + 4, doc_id=doc_id)
             else:
                 result = self._query(directory, session, include, time.monotonic() + 4,
                                      doc_id=doc_id, offset=offset, limit=limit)
@@ -186,6 +205,11 @@ class BridgeReader:
                 return result
             if include != "summary" and result.get("doc_id") != doc_id:
                 return _error("document_target_mismatch", request_id=result["request_id"])
+            if include == "inspect":
+                return {"ok": True, "status": "ok", **session, "doc_id": doc_id,
+                        "captured_utc": result["utc"], "request_id": result["request_id"],
+                        **{key: result[key] for key in ("operations", "variables", "snapshot",
+                           "snapshot_scope", "changed", "read_only", "command_running")}}
             items, document = {}, {}
             for key, value in result.items():
                 m = re.fullmatch(r"items\.([0-9]+)\.(\w+)", key)
@@ -207,4 +231,32 @@ class BridgeReader:
                     "items": page, "returned": len(page),
                     "total": len(page) if include == "summary" else int(result["total"])}
         except (OSError, ValueError, KeyError, OverflowError):
+            return _error("invalid_or_unavailable_bridge_record")
+
+    def object_details(self, session_id, doc_id, object_id, property_name=""):
+        try:
+            if (not canonical_id(session_id) or not canonical_id(doc_id) or
+                    not re.fullmatch(r"[0-9]{1,10}", object_id) or
+                    int(object_id) > 0xffffffff or
+                    (property_name and not re.fullmatch(r"[^\W\d]\w{0,95}", property_name))):
+                return _error("invalid_arguments")
+            found = [(p, s) for p, s in self._sessions() if s["session_id"] == session_id]
+            if len(found) != 1:
+                return _error("session_unavailable")
+            path, identity = found[0]
+            args = {"doc_id": doc_id, "object_id": object_id}
+            if property_name:
+                args["property"] = property_name
+            result = self._query(path, identity, "measure_property" if property_name else
+                                 "object_info", time.monotonic() + 4, **args)
+            if result.get("status") != "ok":
+                return result
+            if result.get("doc_id") != doc_id:
+                return _error("document_target_mismatch", request_id=result["request_id"])
+            fields = {k: v for k, v in result.items() if k.startswith("value.") or k in
+                      ("object_type", "object_name", "property_schema", "raw_value",
+                       "measurement_kind", "request_id", "utc")}
+            return {"ok": True, "status": "ok", "doc_id": doc_id, "object_id": object_id,
+                    "property_name": property_name, "geometry_verified": False, **fields}
+        except (OSError, ValueError, KeyError):
             return _error("invalid_or_unavailable_bridge_record")
