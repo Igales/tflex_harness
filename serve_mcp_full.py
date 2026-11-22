@@ -129,6 +129,7 @@ def main():
     from tflex_harness.config import load_config
     from tflex_harness.docs_search import DocsSearch
     import serve_mcp_readonly as legacy
+    from tflex_bridge_read import BridgeReader
 
     key = os.environ.get("TFLEX_MCP_API_KEY", "")
     if len(key) < 32 or not key.isascii() or any(c.isspace() for c in key):
@@ -139,6 +140,27 @@ def main():
     server = FastMCP("tflex-full")
     docs = DocsSearch()
     cfg = load_config(ROOT)
+    bridge = BridgeReader()
+    bridge_reads_enabled = os.environ.get("TFLEX_MCP_ALLOW_BRIDGE_READ") == "1"
+
+    @server.tool()
+    def get_bridge_status() -> dict:
+        """Discover local T-FLEX GUI sessions by process identity. No CAD command or file write."""
+        if not bridge_reads_enabled:
+            return {"ok": False, "status": "bridge_reads_disabled"}
+        return bridge.status()
+
+    @server.tool()
+    def get_document_snapshot(session_id: str = "", doc_id: str = "", include: str = "summary",
+                              offset: int = 0, limit: int = 40) -> dict:
+        """Inspect T-FLEX GUI documents. Summary lists documents; variables and operations require
+        session_id and doc_id from summary. Writes bridge request/audit files; never edits the
+        CAD document, saves GRB, compiles C#, or starts an external CAD process.
+        Pages are independent, not a single atomic geometry snapshot.
+        """
+        if not bridge_reads_enabled:
+            return {"ok": False, "status": "bridge_reads_disabled"}
+        return bridge.snapshot(session_id, doc_id, include, offset, limit)
 
     @server.tool()
     def search_tflex_docs(query: str, scope: str = "all", limit: int = 5) -> dict:
